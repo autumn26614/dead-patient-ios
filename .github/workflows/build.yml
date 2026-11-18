@@ -1,0 +1,76 @@
+name: Build
+
+# Builds the iOS app on a macOS runner. The game-derived parts of the build
+# (the original program and assets) are not in this repository: the job
+# checks out the private development repository (secrets PRIVATE_REPO, its
+# owner/name, and PRIVATE_REPO_TOKEN), builds there, and uploads the results
+# to that repository's "ci-builds" release. Output here is limited to step
+# names and results.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit of the development repository
+        default: main
+      simulator:
+        description: Run the simulator smoke test (Apple-silicon runners only)
+        type: boolean
+        default: true
+      runner:
+        description: macOS runner (try another when one is out of capacity)
+        type: choice
+        options: [macos-15, macos-26, macos-15-intel]
+        default: macos-15
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+      - name: Build and test
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          ASSET_REPO: ${{ secrets.PRIVATE_REPO }}
+          CI_QUIET: '1'
+          # The simulator app is arm64 only (the translated game's tables are laid out for arm64).
+          CI_SKIP_SIMULATOR: ${{ (inputs.simulator && !contains(inputs.runner, 'intel')) && '0' || '1' }}
+        run: bash tools/ci_build.sh
+      - name: Upload results to the private release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          name="ios-build-${GITHUB_RUN_ID}"
+          mkdir -p "build/$name"
+          cp build/ci.log "build/$name/" 2>/dev/null || true
+          cp -R build/ios-simulator/*.log build/ios-simulator/*.json build/ios-simulator/*.png build/ios-simulator/*.txt \
+            "build/$name/" 2>/dev/null || true
+          cp build/ios/*.log build/ios/*.json "build/$name/" 2>/dev/null || true
+          (cd build && zip -qr "$name.zip" "$name")
+          files=("build/$name.zip")
+          ipa=$(ls build/ios/*.ipa 2>/dev/null | head -n 1 || true)
+          if [ -n "$ipa" ]; then
+            cp "$ipa" "build/$name.ipa"
+            files+=("build/$name.ipa")
+          fi
+          gh release upload ci-builds "${files[@]}" --repo "$PRIVATE_REPO" --clobber > /dev/null
+          echo "Uploaded $(basename -a "${files[@]}" | tr '\n' ' ')to the private release."

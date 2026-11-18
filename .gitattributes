@@ -1,0 +1,4 @@
+direct/ios/** -whitespace
+direct/generated/** -text -whitespace
+direct/game/*.ax binary
+direct/game/*.hsp -text -whitespace
